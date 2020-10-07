@@ -107,10 +107,18 @@
 .stats {
   padding: 12px;
   display: inline-flex;
+  width: 100%;
   dl {
     margin-right: 8px;
   }
   dd {
     color: $gray-400 !important;
+  }
+  span {
+    margin: 0 auto !important;
+    color: $gray-500;
+  }
+  span::after {
+    @extend %with-loading-icon, %as-pseudo;
   }
 }
