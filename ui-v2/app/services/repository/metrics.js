@@ -33,7 +33,7 @@ export default RepositoryService.extend({
     return Promise.all(promises).then(function(results) {
       return {
         meta: meta,
-        series: results[0].series,
+        series: results[0],
         stats: results[1].stats,
       };
     });

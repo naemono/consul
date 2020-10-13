@@ -27,14 +27,14 @@ export default Component.extend({
       this.drawGraphs();
     },
     change: function(evt) {
-      this.data = evt.data;
+      this.data = evt.data.series;
       this.element.querySelector('.sparkline-loader').style.display = 'none';
       this.drawGraphs();
     },
   },
 
   drawGraphs: function() {
-    if (!this.data.series) {
+    if (!this.data) {
       return;
     }
 
@@ -50,13 +50,11 @@ export default Component.extend({
     // To be safe, filter any series that actually have no data points. This can
     // happen thanks to our current provider contract allowing empty arrays for
     // series data if there is no value.
-    //
-    // TODO(banks): switch series provider data to be a single array with series
-    // values as properties as we need below to enforce sensible alignment of
-    // timestamps and explicit summing expectations.
-    let series = ((this.data || {}).series || []).filter(s => s.data.length > 0);
+    let maybeData = this.data || {};
+    let series = maybeData.data || [];
+    let labels = maybeData.labels || [];
 
-    if (series.length == 0) {
+    if (series.length == 0 || labels.length == 0 || !maybeData.summedLabel ) {
       // Put the graph in an error state that might get fixed if metrics show up
       // on next poll.
       let loader = this.element.querySelector('.sparkline-loader');
@@ -65,32 +63,26 @@ export default Component.extend({
       return;
     }
 
-    // Fill the timestamps for x axis.
-    let data = series[0].data.map(d => {
-      return { time: d[0] };
-    });
-    let keys = [];
-    // Initialize zeros
-    let summed = this.data.series[0].data.map(d => 0);
-
-    for (var i = 0; i < series.length; i++) {
-      let s = series[i];
-      // Attach the value as a new field to the data grid.
-      s.data.map((d, idx) => {
-        data[idx][s.label] = d[1];
-        summed[idx] += d[1];
-      });
-      keys.push(s.label);
-    }
-
     let st = stack()
-      .keys(keys)
+      .keys(labels)
       .order(stackOrderReverse);
 
-    let stackData = st(data);
+    let stackData = st(series);
+
+    // Sum all of the values for each point to get max range. Technically
+    // stackData contains this but I didn't find reliable documentation on
+    // whether we can rely on the highest stacked area to always be first/last
+    // in array etc. so this is simpler.
+    let summed = series.map((d) => {
+      let sum = 0;
+      labels.forEach(l => {
+        sum = sum + d[l];
+      });
+      return sum;
+    })
 
     let x = scaleTime()
-      .domain(extent(data, d => d.time))
+      .domain(extent(series, d => d.time))
       .range([0, w]);
 
     let y = scaleLinear()
@@ -105,7 +97,7 @@ export default Component.extend({
     // Use the grey/red we prefer by default but have more colors available in
     // case user adds extra series with a custom provider.
     let colorScheme = ['#DCE0E6', '#C73445'].concat(schemeTableau10);
-    let color = scaleOrdinal(colorScheme).domain(keys);
+    let color = scaleOrdinal(colorScheme).domain(labels);
 
     svg
       .selectAll('path')
@@ -126,20 +118,29 @@ export default Component.extend({
 
     let tooltip = select(this.element.querySelector('.tooltip'));
     tooltip.selectAll('.sparkline-tt-legend').remove();
+    tooltip.selectAll('.sparkline-tt-sum').remove();
 
-    for (var k of keys) {
+    // Add a label for the summed value
+    if (labels.length > 1) {
+      tooltip.append('div')
+        .attr('class', 'sparkline-tt-sum')
+        .append('span')
+          .text(maybeData.summedLabel+": ")
+          .append('span')
+            .attr('class', 'sparkline-tt-sum-value');
+    }
+
+    for (var l of labels) {
       let legend = tooltip.append('div').attr('class', 'sparkline-tt-legend');
 
-      legend
-        .append('div')
+      legend.append('div')
         .attr('class', 'sparkline-tt-legend-color')
-        .style('background-color', color(k));
+        .style('background-color', color(l))
 
-      legend
+      legend.append('span')
+        .text(l + ': ')
         .append('span')
-        .text(k + ': ')
-        .append('span')
-        .attr('class', 'sparkline-tt-legend-value');
+          .attr('class', 'sparkline-tt-legend-value');
     }
 
     let tipVals = tooltip.selectAll('.sparkline-tt-legend-value');
@@ -152,10 +153,12 @@ export default Component.extend({
         // We update here since we might redraw the graph with user's cursor
         // stationary over it. If that happens mouseover fires but not
         // mousemove but the tooltip and cursor are wrong (based on old data).
-        self.updateTooltip(event, data, stackData, keys, x, tooltip, tipVals, cursor);
+        self.updateTooltip(event, series, stackData, summed, maybeData.summedLabel,
+          labels, x, tooltip, tipVals, cursor);
       })
       .on('mousemove', function(d, i) {
-        self.updateTooltip(event, data, stackData, keys, x, tooltip, tipVals, cursor);
+        self.updateTooltip(event, series, stackData, summed, maybeData.summedLabel,
+          labels, x, tooltip, tipVals, cursor);
       })
       .on('mouseout', function() {
         tooltip.style('visibility', 'hidden');
@@ -168,7 +171,7 @@ export default Component.extend({
       this.svg.on('mouseover mousemove mouseout', null);
     }
   },
-  updateTooltip: function(event, data, stackData, keys, x, tooltip, tipVals, cursor) {
+  updateTooltip: function(event, series, stackData, summed, summedLabel, labels, x, tooltip, tipVals, cursor) {
     let [mouseX] = mouse(event.currentTarget);
     cursor.attr('x', mouseX);
 
@@ -176,7 +179,7 @@ export default Component.extend({
     var bisectTime = bisector(function(d) {
       return d.time;
     }).left;
-    let tipIdx = bisectTime(data, mouseTime);
+    let tipIdx = bisectTime(series, mouseTime);
 
     tooltip
       // 22 px is the correction to align the arrow on the tool tip with
@@ -185,9 +188,13 @@ export default Component.extend({
       .select('.sparkline-time')
       .text(niceTimeWithSeconds(mouseTime));
 
+    // Get the summed value - that's the one of the top most stack.
+    tooltip.select('.sparkline-tt-sum-value')
+      .text(this.formatTooltip(summedLabel, summed[tipIdx]));
+
     tipVals.nodes().forEach((n, i) => {
       let val = stackData[i][tipIdx][1] - stackData[i][tipIdx][0];
-      select(n).text(this.formatTooltip(keys[i], val));
+      select(n).text(this.formatTooltip(labels[i], val));
     });
     cursor.attr('x', mouseX);
   },
